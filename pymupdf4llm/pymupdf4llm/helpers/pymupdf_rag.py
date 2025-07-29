@@ -43,7 +43,7 @@ from pymupdf import mupdf
 from pymupdf4llm.helpers.get_text_lines import get_raw_lines, is_white
 from pymupdf4llm.helpers.multi_column import column_boxes
 from pymupdf4llm.helpers.progress import ProgressBar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
 
 pymupdf.TOOLS.unset_quad_corrections(True)
@@ -216,7 +216,9 @@ class TocHeaders:
 # store relevant parameters here
 @dataclass
 class Parameters:
-    pass
+    """Container for assorted page information."""
+
+    deleted_tables: list = field(default_factory=list)
 
 
 def refine_boxes(boxes, enlarge=0):
@@ -514,7 +516,9 @@ def to_markdown(
             ignore_invisible=not parms.accept_invisible,
         )
         nlines = [
-            l for l in nlines if not intersects_rects(l[0], parms.tab_rects.values())
+            l
+            for l in nlines
+            if not intersects_rects(l[0], parms.tab_rects, parms.deleted_tables)
         ]
 
         parms.line_rects.extend([l[0] for l in nlines])  # store line rectangles
@@ -538,6 +542,7 @@ def to_markdown(
                     for i, tab_rect in parms.tab_rects.items()
                     if tab_rect.y1 <= lrect.y0
                     and i not in parms.written_tables
+                    and i not in parms.deleted_tables
                     and (
                         0
                         or lrect.x0 <= tab_rect.x0 < lrect.x1
@@ -562,6 +567,7 @@ def to_markdown(
                         )
                         parms.line_rects.extend(cells)
                     parms.written_tables.append(i)
+                    parms.deleted_tables.append(i)
                     prev_hdr_string = None
 
             # ------------------------------------------------------------
@@ -735,14 +741,22 @@ def to_markdown(
                 return i
         return 0
 
-    def intersects_rects(rect, rect_list):
-        """Check if middle of rect is contained in a rect of the list."""
+    def intersects_rects(rect, rect_list, deleted=None):
+        """Check if middle of rect intersects rectangles, honoring deletions."""
+
         delta = (-1, -1, 1, 1)  # enlarge rect_list members somewhat by this
         enlarged = rect + delta
         abs_enlarged = abs(enlarged) * 0.5
-        for i, r in enumerate(rect_list, start=1):
+
+        if isinstance(rect_list, dict):
+            items = rect_list.items()
+        else:
+            items = enumerate(rect_list, start=1)
+
+        for i, r in items:
             if abs(enlarged & r) > abs_enlarged:
-                return i
+                if deleted is None or i in deleted:
+                    return i
         return 0
 
     def output_tables(parms, text_rect):
@@ -753,7 +767,7 @@ def to_markdown(
                 [j for j in parms.tab_rects.items() if j[1].y1 <= text_rect.y0],
                 key=lambda j: (j[1].y1, j[1].x0),
             ):
-                if i in parms.written_tables:
+                if i in parms.written_tables or i in parms.deleted_tables:
                     continue
                 this_md += parms.tabs[i].to_markdown(clean=False) + "\n"
                 if EXTRACT_WORDS:
@@ -771,10 +785,11 @@ def to_markdown(
                     )
                     parms.line_rects.extend(cells)
                 parms.written_tables.append(i)  # do not touch this table twice
+                parms.deleted_tables.append(i)
 
         else:  # output all remaining tables
             for i, trect in parms.tab_rects.items():
-                if i in parms.written_tables:
+                if i in parms.written_tables or i in parms.deleted_tables:
                     continue
                 this_md += parms.tabs[i].to_markdown(clean=False) + "\n"
                 if EXTRACT_WORDS:
@@ -792,6 +807,7 @@ def to_markdown(
                     )
                     parms.line_rects.extend(cells)
                 parms.written_tables.append(i)  # do not touch this table twice
+                parms.deleted_tables.append(i)
         return this_md
 
     def output_images(parms, text_rect, force_text):
@@ -1027,6 +1043,7 @@ def to_markdown(
 
         # Locate all tables on page
         parms.written_tables = []  # stores already written tables
+        parms.deleted_tables = []  # indexes of tables that have been output
         omitted_table_rects = []
         parms.tabs = []
         if IGNORE_GRAPHICS or not table_strategy:
